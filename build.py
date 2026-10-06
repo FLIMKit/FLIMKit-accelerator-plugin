@@ -2,7 +2,9 @@
 
     python build.py              # build into flimkit_accelerator_plugin/
     python build.py --install    # build, then copy the folder into ~/.flimkit/plugins
-    python build.py --no-openmp  # one thread, for a compiler without OpenMP
+
+The kernel threads itself with pthreads, so there is nothing to install first
+and no OpenMP flag. FLIMKIT_C_THREADS caps the pool at run time.
 """
 import argparse
 import ctypes
@@ -22,37 +24,23 @@ def target():
         return 'libflimkit_accelerator.dylib'
     return 'libflimkit_accelerator.so'
 
-def compile_commands(out, openmp):
+def compile_command(out):
     if sys.platform == 'win32':
-        cmd = ['cl', '/nologo', '/O2', '/LD', SRC, '/Fe:' + out]
-        if openmp == True:
-            return [cmd[:3] + ['/openmp'] + cmd[3:], cmd]
-        return [cmd]
+        return ['cl', '/nologo', '/O2', '/LD', SRC, '/Fe:' + out]
     cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
     if cc is None:
         sys.exit('No C compiler found. Install gcc or clang, or set CC.')
     shared = ['-dynamiclib'] if sys.platform == 'darwin' else ['-shared']
-    base = [cc, '-O3', '-fPIC', *shared, SRC, '-o', out, '-lm']
-    if openmp == False:
-        return [base]
-    if sys.platform == 'darwin':
-        # Apple clang needs libomp from Homebrew; fall back to one thread without it
-        prefix = os.environ.get('LIBOMP_PREFIX', '/opt/homebrew/opt/libomp')
-        omp = [cc, '-O3', '-fPIC', '-dynamiclib', '-Xpreprocessor', '-fopenmp',
-               '-I' + prefix + '/include', SRC, '-o', out, '-L' + prefix + '/lib', '-lomp', '-lm']
-        return [omp, base]
-    return [base[:2] + ['-fopenmp'] + base[2:], base]
+    cmd = [cc, '-O3', '-fPIC', *shared, SRC, '-o', out, '-lm']
+    if sys.platform != 'darwin':
+        cmd.insert(1, '-pthread')
+    return cmd
 
-def build(openmp=True):
+def build():
     out = PKG + os.sep + target()
-    attempts = compile_commands(out, openmp)
-    for i, cmd in enumerate(attempts):
-        print('$ ' + ' '.join(cmd))
-        if subprocess.run(cmd).returncode == 0:
-            break
-        if i + 1 < len(attempts):
-            print('  failed, trying without OpenMP')
-    else:
+    cmd = compile_command(out)
+    print('$ ' + ' '.join(cmd))
+    if subprocess.run(cmd).returncode != 0:
         sys.exit('Compilation failed.')
     lib = ctypes.CDLL(out)
     print('Built ' + out + ' (' + str(lib.flimkit_c_threads()) + ' thread(s))')
@@ -70,8 +58,7 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--install', action='store_true')
-    ap.add_argument('--no-openmp', action='store_true')
     args = ap.parse_args()
-    build(openmp=not args.no_openmp)
+    build()
     if args.install == True:
         install()

@@ -8,7 +8,7 @@ from flimkit.GPU import PluginBackend
 from flimkit.plugins import fit_backend
 
 FLIMKIT_PLUGIN_API = 1
-ABI_VERSION = 1
+ABI_VERSION = 2
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def library_name():
