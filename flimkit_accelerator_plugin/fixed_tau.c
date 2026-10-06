@@ -1,13 +1,5 @@
-/* Fixed-lifetime projection for FLIMKit, one pixel per loop iteration.
- *
- * For each pixel: subtract its background, project onto the pseudo-inverse of the
- * convolved basis, clamp the amplitudes at zero, and return the chi2 terms of the
- * raw decay against amps @ A.T + bg. This is the same arithmetic as FLIMKit's
- * fixed-tau path, so the maps agree with it to rounding.
- *
- * Built by build.py into a shared library and called through ctypes. OpenMP is used
- * when the compiler has it; without it the loop runs on one core.
- */
+/* Fixed-lifetime projection, one pixel per iteration. Same arithmetic as
+ * FLIMKit's fixed-tau path, so the maps agree with it to rounding. */
 #include <math.h>
 #include <stdint.h>
 #ifdef _OPENMP

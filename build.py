@@ -3,22 +3,17 @@
     python build.py              # build into flimkit_accelerator_plugin/
     python build.py --install    # build, then copy the folder into ~/.flimkit/plugins
     python build.py --no-openmp  # one thread, for a compiler without OpenMP
-
-It needs a C compiler: cc/gcc/clang on Linux and macOS (Xcode command line tools),
-or MSVC's cl on Windows from a Developer Command Prompt. No Python headers are
-needed, because the library is loaded with ctypes rather than imported.
 """
 import argparse
+import ctypes
 import os
 import shutil
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.join(HERE, 'flimkit_accelerator_plugin')
-SRC = os.path.join(PKG, 'fixed_tau.c')
-sys.path.insert(0, HERE)
-
+PKG = HERE + os.sep + 'flimkit_accelerator_plugin'
+SRC = PKG + os.sep + 'fixed_tau.c'
 
 def target():
     if sys.platform == 'win32':
@@ -27,29 +22,29 @@ def target():
         return 'libflimkit_accelerator.dylib'
     return 'libflimkit_accelerator.so'
 
-
 def compile_commands(out, openmp):
     if sys.platform == 'win32':
         cmd = ['cl', '/nologo', '/O2', '/LD', SRC, '/Fe:' + out]
-        return [cmd[:3] + ['/openmp'] + cmd[3:], cmd] if openmp else [cmd]
+        if openmp == True:
+            return [cmd[:3] + ['/openmp'] + cmd[3:], cmd]
+        return [cmd]
     cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
     if cc is None:
         sys.exit('No C compiler found. Install gcc or clang, or set CC.')
     shared = ['-dynamiclib'] if sys.platform == 'darwin' else ['-shared']
     base = [cc, '-O3', '-fPIC', *shared, SRC, '-o', out, '-lm']
-    if not openmp:
+    if openmp == False:
         return [base]
     if sys.platform == 'darwin':
         # Apple clang needs libomp from Homebrew; fall back to one thread without it
         prefix = os.environ.get('LIBOMP_PREFIX', '/opt/homebrew/opt/libomp')
         omp = [cc, '-O3', '-fPIC', '-dynamiclib', '-Xpreprocessor', '-fopenmp',
-               f'-I{prefix}/include', SRC, '-o', out, f'-L{prefix}/lib', '-lomp', '-lm']
+               '-I' + prefix + '/include', SRC, '-o', out, '-L' + prefix + '/lib', '-lomp', '-lm']
         return [omp, base]
     return [base[:2] + ['-fopenmp'] + base[2:], base]
 
-
 def build(openmp=True):
-    out = os.path.join(PKG, target())
+    out = PKG + os.sep + target()
     attempts = compile_commands(out, openmp)
     for i, cmd in enumerate(attempts):
         print('$ ' + ' '.join(cmd))
@@ -59,20 +54,17 @@ def build(openmp=True):
             print('  failed, trying without OpenMP')
     else:
         sys.exit('Compilation failed.')
-    from flimkit_accelerator_plugin import load_library
-    lib = load_library(out)
-    print(f'Built {out} ({lib.flimkit_c_threads()} thread(s))')
+    lib = ctypes.CDLL(out)
+    print('Built ' + out + ' (' + str(lib.flimkit_c_threads()) + ' thread(s))')
     return out
 
-
 def install():
-    dest = os.path.join(os.path.expanduser('~'), '.flimkit', 'plugins', 'flimkit_accelerator_plugin')
-    if os.path.isdir(dest):
+    dest = os.path.expanduser('~') + os.sep + '.flimkit' + os.sep + 'plugins' + os.sep + 'flimkit_accelerator_plugin'
+    if os.path.isdir(dest) == True:
         shutil.rmtree(dest)
     shutil.copytree(PKG, dest, ignore=shutil.ignore_patterns('__pycache__'))
-    print(f'Installed to {dest}')
+    print('Installed to ' + dest)
     print('Tick "Load from ~/.flimkit/plugins" in File > Preferences > Plugins and restart.')
-
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__,
@@ -81,5 +73,5 @@ if __name__ == '__main__':
     ap.add_argument('--no-openmp', action='store_true')
     args = ap.parse_args()
     build(openmp=not args.no_openmp)
-    if args.install:
+    if args.install == True:
         install()
