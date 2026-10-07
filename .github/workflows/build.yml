@@ -120,7 +120,7 @@ jobs:
         with:
           cuda: '12.6.0'
           method: network
-          sub-packages: '["nvcc", "cudart"]'
+          sub-packages: '["nvcc", "cudart", "cuobjdump"]'
       - name: Build it
         shell: bash
         run: |
@@ -167,12 +167,38 @@ jobs:
             (cd stage/$slug && zip -qr "$GITHUB_WORKSPACE/dist/flimkit-accelerator-$slug.zip" .)
           done
           ls -la dist
+      - name: A release has to carry every library
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          fail=0
+          for want in \
+              linux-x86_64:libflimkit_accelerator.so \
+              linux-x86_64:libflimkit_accelerator_cuda.so \
+              linux-aarch64:libflimkit_accelerator.so \
+              windows-x86_64:flimkit_accelerator.dll \
+              windows-x86_64:flimkit_accelerator_cuda.dll \
+              windows-arm64:flimkit_accelerator.dll \
+              macos-universal2:libflimkit_accelerator.dylib; do
+            slug=${want%%:*}
+            lib=${want#*:}
+            if unzip -l "dist/flimkit-accelerator-$slug.zip" | grep -q "$lib"; then
+              echo "ok   $slug $lib"
+            else
+              echo "MISSING $slug $lib"
+              fail=1
+            fi
+          done
+          exit $fail
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: >-
+          startsWith(github.ref, 'refs/tags/v')
+          && !contains(needs.*.result, 'failure')
+          && !contains(needs.*.result, 'cancelled')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
