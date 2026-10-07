@@ -132,7 +132,9 @@ jobs:
                -o out/${{ matrix.slug }}/${{ matrix.out }}
       - name: Say which architectures are inside it
         shell: bash
-        run: cuobjdump --list-elf out/${{ matrix.slug }}/${{ matrix.out }} || true
+        run: |
+          dump=$(dirname "$(which nvcc)")/cuobjdump
+          "$dump" --list-elf out/${{ matrix.slug }}/${{ matrix.out }}
       - uses: actions/upload-artifact@v4
         with:
           name: cuda-${{ matrix.slug }}
