@@ -104,7 +104,10 @@ jobs:
             slug: linux-x86_64
             out: libflimkit_accelerator_cuda.so
             pic: -Xcompiler -fPIC
-          - os: windows-latest
+          # windows-latest ships Visual Studio 18, and CUDA 12.6 refuses any
+          # host compiler newer than 2022. Pinning the runner keeps nvcc on a
+          # combination it supports rather than overriding the check.
+          - os: windows-2022
             slug: windows-x86_64
             out: flimkit_accelerator_cuda.dll
             pic: ''
@@ -157,6 +160,7 @@ jobs:
             cp flimkit_accelerator_plugin/kernels.c "$stage"/
             cp flimkit_accelerator_plugin/kernels.cu "$stage"/
             for other in $(find libs -type d -name "$slug"); do cp "$other"/* "$stage"/; done
+            rm -f "$stage"/*.pdb "$stage"/*.lib "$stage"/*.exp
             cp README.md LICENSE.md stage/$slug/
             (cd stage/$slug && zip -qr "$GITHUB_WORKSPACE/dist/flimkit-accelerator-$slug.zip" .)
           done
