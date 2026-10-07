@@ -4,11 +4,12 @@ import sys
 
 import numpy as np
 
+from flimkit.FLIM.fit_tools import TAU_FIT_UNIT_S, calibrated_from_terms
 from flimkit.GPU import PluginBackend
 from flimkit.plugins import fit_backend
 
 FLIMKIT_PLUGIN_API = 1
-ABI_VERSION = 2
+ABI_VERSION = 3
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def library_name():
@@ -17,6 +18,33 @@ def library_name():
     if sys.platform == 'darwin':
         return 'libflimkit_accelerator.dylib'
     return 'libflimkit_accelerator.so'
+
+def cuda_library_name():
+    if sys.platform == 'win32':
+        return 'flimkit_accelerator_cuda.dll'
+    return 'libflimkit_accelerator_cuda.so'
+
+def load_cuda_library(path=None):
+    if path is None:
+        path = HERE + os.sep + cuda_library_name()
+    if os.path.isfile(path) == False:
+        return None
+    try:
+        lib = ctypes.CDLL(path)
+        if lib.flimkit_cu_abi_version() != ABI_VERSION or lib.flimkit_cu_available() != 1:
+            return None
+    except OSError:
+        return None
+    f64 = np.ctypeslib.ndpointer(np.float64, flags='C_CONTIGUOUS')
+    u8 = np.ctypeslib.ndpointer(np.uint8, flags='C_CONTIGUOUS')
+    i64p = np.ctypeslib.ndpointer(np.int64, flags='C_CONTIGUOUS')
+    i32p = np.ctypeslib.ndpointer(np.int32, flags='C_CONTIGUOUS')
+    i64 = ctypes.c_int64
+    f = ctypes.c_double
+    lib.flimkit_cu_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
+                                        f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
+    lib.flimkit_cu_free_tau.restype = ctypes.c_int
+    return lib
 
 def load_library(path=None):
     if path is None:
@@ -29,18 +57,28 @@ def load_library(path=None):
     f64 = np.ctypeslib.ndpointer(np.float64, flags='C_CONTIGUOUS')
     f32 = np.ctypeslib.ndpointer(np.float32, flags='C_CONTIGUOUS')
     u8 = np.ctypeslib.ndpointer(np.uint8, flags='C_CONTIGUOUS')
+    i64p = np.ctypeslib.ndpointer(np.int64, flags='C_CONTIGUOUS')
+    i32p = np.ctypeslib.ndpointer(np.int32, flags='C_CONTIGUOUS')
     i64 = ctypes.c_int64
+    f = ctypes.c_double
     lib.flimkit_c_fixed_tau.argtypes = [f32, f32, i64, i64, f64, f64, i64, f64, f64, f64, u8]
     lib.flimkit_c_fixed_tau.restype = None
+    lib.flimkit_c_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
+                                       f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
+    lib.flimkit_c_free_tau.restype = ctypes.c_int
     return lib
 
-# returns None outside the plain case, which hands the fit back to FLIMKit
-class CFixedTau(PluginBackend):
-    def __init__(self, lib):
+MAX_EXP = 3
+
+class CKernels(PluginBackend):
+    def __init__(self, lib, cuda=None):
         self._lib = lib
+        self._cuda = cuda
 
     def __repr__(self):
-        return 'CFixedTau(threads=' + str(self._lib.flimkit_c_threads()) + ')'
+        where = 'cuda+cpu' if self._cuda is not None else 'cpu'
+        return ('CKernels(' + where + ', threads='
+                + str(self._lib.flimkit_c_threads()) + ')')
 
     def batch_fixed_tau(self, stack, A, taus_fixed, min_photons, correct_pileup,
                         n_sync_px, progress_callback=None, tvb_profile=None,
@@ -77,7 +115,81 @@ class CFixedTau(PluginBackend):
             progress_callback(valid_idx.size, valid_idx.size)
         return maps
 
-@fit_backend('accelerator', 'FLIMKit accelerator: C fixed-tau (ctypes)', priority=100)
+    def batch_free_tau_fit(self, stack, irf_array, tcspc_res, taus_init, tau_min_s,
+                           tau_max_s, n_exp, min_photons, correct_pileup, n_sync_px,
+                           n_steps=50, lr=None, tvb_profile=None, fit_tvb=False,
+                           fit_idx=None, n_sync_model=None, progress_callback=None,
+                           max_iter=200, tol=1e-8, **kwargs):
+        if n_exp < 1 or n_exp > MAX_EXP or n_sync_model is not None or \
+                (fit_tvb == True and tvb_profile is not None):
+            return None
+        ny, nx, n_bins = stack.shape
+        flat = stack.reshape(ny * nx, n_bins)
+        valid_idx = np.flatnonzero(flat.sum(axis=1) >= min_photons)
+        maps = self._init_maps(ny, nx, n_exp, intensity=stack.sum(axis=2),
+                               taus_fixed_ns=taus_init * 1e9, free_tau=True)
+        if valid_idx.size == 0:
+            return maps
+        raw = np.ascontiguousarray(flat[valid_idx], dtype=np.float64)
+        data = raw
+        if correct_pileup == True and n_sync_px > 0:
+            from flimkit.FLIM.fit_tools import coates_pileup_correction
+            data = np.ascontiguousarray(
+                [coates_pileup_correction(row, n_sync_px) for row in raw], dtype=np.float64)
+        bg = np.ascontiguousarray(
+            self._estimate_bg_batch(data.astype(np.float32),
+                                    np.ones(data.shape[0], dtype=bool)), dtype=np.float64)
+        idx = np.arange(n_bins) if fit_idx is None else np.asarray(fit_idx)
+        idx = np.ascontiguousarray(idx, dtype=np.int64)
+        irf = np.ascontiguousarray(irf_array, dtype=np.float64)
+        dt = tcspc_res / TAU_FIT_UNIT_S
+        amp_hi = float(raw.max()) * 10.0
+        p0 = np.ascontiguousarray(
+            np.concatenate([taus_init / TAU_FIT_UNIT_S,
+                            np.full(n_exp, float(raw.max()) / n_exp)]), dtype=np.float64)
+        lo = np.ascontiguousarray(
+            [float(tau_min_s) / TAU_FIT_UNIT_S] * n_exp + [0.0] * n_exp, dtype=np.float64)
+        hi = np.ascontiguousarray(
+            [float(tau_max_s) / TAU_FIT_UNIT_S] * n_exp + [amp_hi] * n_exp, dtype=np.float64)
+        n = data.shape[0]
+        out_p = np.empty((n, 2 * n_exp))
+        out_cost = np.empty(n)
+        out_iter = np.empty(n, dtype=np.int32)
+        numerator = np.empty(n)
+        expected = np.empty(n)
+        valid = np.empty(n, dtype=np.uint8)
+        call = self._lib.flimkit_c_free_tau
+        rc = -1
+        if self._cuda is not None:
+            rc = self._cuda.flimkit_cu_free_tau(
+                data, raw, bg, n, n_bins, n_exp, irf, idx, idx.size, dt, p0, lo, hi,
+                max_iter, tol, out_p, out_cost, out_iter, numerator, expected, valid)
+            if rc != 0:
+                print('  [per-pixel] add-on CUDA free-tau failed (' + str(rc)
+                      + '), using the C kernel')
+        if rc != 0:
+            rc = call(data, raw, bg, n, n_bins, n_exp, irf, idx, idx.size, dt, p0, lo, hi,
+                      max_iter, tol, out_p, out_cost, out_iter, numerator, expected, valid)
+        if rc != 0:
+            return None
+        taus = out_p[:, :n_exp]
+        amps = out_p[:, n_exp:2 * n_exp]
+        order = np.argsort(taus, axis=1)
+        taus = np.take_along_axis(taus, order, 1) * TAU_FIT_UNIT_S
+        amps = np.take_along_axis(amps, order, 1)
+        ok = valid.astype(bool) & np.all(np.isfinite(out_p), axis=1)
+        dof = max(idx.size - 2 * n_exp, 1)
+        calibrated = calibrated_from_terms(numerator, expected, ok)
+        self._scatter_free_tau(
+            maps, valid_idx=valid_idx[ok], taus_s=taus[ok], amps=amps[ok],
+            chi2_r=numerator[ok] / dof, calibrated_values=calibrated[ok],
+            ny=ny, nx=nx, n_exp=n_exp)
+        if progress_callback is not None:
+            progress_callback(valid_idx.size, valid_idx.size)
+        return maps
+
+@fit_backend('accelerator', 'FLIMKit accelerator: C fixed-tau and free-tau (ctypes)',
+             priority=100)
 def make_backend():
     lib = load_library()
-    return None if lib is None else CFixedTau(lib)
+    return None if lib is None else CKernels(lib, load_cuda_library())

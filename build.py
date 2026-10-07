@@ -2,6 +2,7 @@
 
     python build.py              # build into flimkit_accelerator_plugin/
     python build.py --install    # build, then copy the folder into ~/.flimkit/plugins
+    python build.py --no-cuda    # skip the CUDA kernel even when nvcc is present
 
 The kernel threads itself with pthreads, so there is nothing to install first
 and no OpenMP flag. FLIMKIT_C_THREADS caps the pool at run time.
@@ -15,7 +16,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = HERE + os.sep + 'flimkit_accelerator_plugin'
-SRC = PKG + os.sep + 'fixed_tau.c'
+SRC = PKG + os.sep + 'kernels.c'
+CU_SRC = PKG + os.sep + 'kernels.cu'
 
 def target():
     if sys.platform == 'win32':
@@ -23,6 +25,11 @@ def target():
     if sys.platform == 'darwin':
         return 'libflimkit_accelerator.dylib'
     return 'libflimkit_accelerator.so'
+
+def cuda_target():
+    if sys.platform == 'win32':
+        return 'flimkit_accelerator_cuda.dll'
+    return 'libflimkit_accelerator_cuda.so'
 
 def compile_command(out):
     if sys.platform == 'win32':
@@ -46,6 +53,25 @@ def build():
     print('Built ' + out + ' (' + str(lib.flimkit_c_threads()) + ' thread(s))')
     return out
 
+def build_cuda():
+    out = PKG + os.sep + cuda_target()
+    nvcc = os.environ.get('NVCC') or shutil.which('nvcc')
+    if nvcc is None:
+        print('No nvcc on PATH, skipping the CUDA kernel. The add-on fits on the CPU.')
+        return None
+    cmd = [nvcc, '-O3', '-shared', '-o', out]
+    if sys.platform != 'win32':
+        cmd += ['-Xcompiler', '-fPIC']
+    cmd.append(CU_SRC)
+    print('$ ' + ' '.join(cmd))
+    if subprocess.run(cmd).returncode != 0:
+        print('CUDA build failed, leaving the add-on on the CPU kernel.')
+        return None
+    lib = ctypes.CDLL(out)
+    print('Built ' + out + ' (device present: '
+          + str(lib.flimkit_cu_available() == 1) + ')')
+    return out
+
 def install():
     dest = os.path.expanduser('~') + os.sep + '.flimkit' + os.sep + 'plugins' + os.sep + 'flimkit_accelerator_plugin'
     if os.path.isdir(dest) == True:
@@ -58,7 +84,10 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--install', action='store_true')
+    ap.add_argument('--no-cuda', action='store_true')
     args = ap.parse_args()
     build()
+    if args.no_cuda == False:
+        build_cuda()
     if args.install == True:
         install()

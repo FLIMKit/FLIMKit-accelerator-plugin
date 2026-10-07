@@ -1,6 +1,6 @@
 # flimkit-accelerator-plugin
 
-A [FLIMKit](https://github.com/FLIMKit/FLIMKit) fit backend written in C and loaded with `ctypes`, registered through the `@fit_backend` add-on hook.
+A [FLIMKit](https://github.com/FLIMKit/FLIMKit) fit backend written in C and loaded with `ctypes`, registered through the `@fit_backend` add-on hook. There is a CUDA build of the free-lifetime kernel as well, used when nvcc was on PATH at build time and a card is present.
 
 It runs fixed-lifetime per-pixel fits: background subtraction, projection onto the fixed-lifetime basis, clamped amplitudes and the χ² terms, one pixel per loop iteration, on every core. The maps match FLIMKit's own CPU path to rounding (about 1e-15 relative). On a synthetic 512×512×256 stack with 4 threads it took 1–3 s against 50–56 s for FLIMKit's CPU path (19–51× across runs on a shared machine). It has not been compared against FLIMKit's GPU backends yet.
 
@@ -29,6 +29,7 @@ That needs a C compiler:
 - **Linux:** gcc or clang.
 - **macOS:** the Xcode command line tools.
 - **Windows:** MSVC, run from a Developer Command Prompt.
+- **CUDA, optional:** nvcc from the CUDA toolkit. `build.py` builds the GPU kernel when it finds nvcc and skips it otherwise, so nothing breaks without it. `--no-cuda` skips it anyway.
 
 No Python headers are needed, and nothing has to be installed for the threads.
 
@@ -38,13 +39,58 @@ It has to be installed as a folder, not as a wheel. Python cannot load compiled 
 
 ## What it covers
 
-Only the plain case: a fixed-lifetime fit with no fit window, background profile or pile-up correction. Everything else returns `None`, which hands the fit back to FLIMKit: to the GPU backend this one displaced, or to the CPU. One-exponential scans, free-lifetime fits and distribution fits are left to FLIMKit too.
+**Fixed lifetime.** Only the plain case: no fit window, background profile or pile-up correction. Everything else returns `None`, which hands the fit back to FLIMKit: to the GPU backend this one displaced, or to the CPU.
+
+**Free lifetime**, up to three exponentials, including a fit window and pile-up correction of the data. It declines a time-varying background, pile-up folded into the model, and more than three components. It is the same projected Levenberg-Marquardt as FLIMKit's numba kernel, step for step, so the two agree: on 16,384 pixels at 256 bins the lifetime, amplitude, fraction and χ² maps match to 1e-14 relative, and kernel against kernel on the same inputs the parameters sit 1.7e-12 apart with identical iteration counts.
+
+One-exponential scans and distribution fits are left to FLIMKit.
+
+| Fit | Where it runs | µs/px, 16,384 px at 256 bins, 10-core M4 |
+|---|---|---|
+| Free lifetime, this add-on | C, all cores | 5.7 |
+| Free lifetime, FLIMKit | numba | 19.2 |
+| Free lifetime, CUDA build | see below, slower than C on a 48-core box | |
 
 That is the pattern for adding more kernels: write the C, add a method on `CFixedTau` with the signature in `flimkit/GPU/_base.py`, and decline the cases you have not covered.
 
 To compare it against the built-in backends without uninstalling it, set `FLIMKIT_FIT_BACKEND` to `cuda`, `mlx`, `cpu` or `accelerator`.
 
-`__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 2 as of the move off OpenMP.
+`__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 3 as of the free-lifetime kernel.
+
+`FLIMKIT_C_THREADS` caps the CPU pool. Threads take 256-pixel chunks from a shared counter rather than one block each, because slow pixels cluster in real images.
+
+## The CUDA kernel, and when it is worth building
+
+`kernels.cu` is the free-lifetime kernel for an NVIDIA card, one thread per pixel in double precision, with the launch bounded to a few Levenberg-Marquardt steps at a time so no launch outlasts the Windows display watchdog. Finished pixels drop out between launches, and a CUDA failure at any point returns a non-zero code, which falls back to the C kernel.
+
+It gives the same answer as the C kernel, inside floating point. Measured on an RTX A5000 with CUDA 12.1 against the C kernel on 48 cores, same synthetic data into both, 65,536 pixels per case:
+
+| Case | Worst τ difference |
+|---|---|
+| 2-exp, 400 photons/px | 0.010 ps |
+| 2-exp, 120 photons/px | 0.0002 ps |
+| 3-exp, 4,000 photons/px | 0.740 ps |
+| 2-exp, fit window from bin 30 | 2.911 ps |
+| 1-exp, 2,000 photons/px | 0.000005 ps |
+| 2-exp, 4,096 bins | 0.000000 ps |
+
+Worst means one pixel out of 65,536. The median difference is below 1e-6 ps in every case, the reduced cost ratio is exactly 1.0, and the valid flags are identical. Shot noise on a 3 ns lifetime at 4,000 photons is around 60 to 70 ps, so none of this reaches a lifetime map.
+
+What is left is nvcc contracting multiply-adds into fma, which the host compiler does differently. Building with `-fmad=false` drops the worst case to 0.0014 ps and makes the per-pixel iteration counts match everywhere, including the three-exponential case where they otherwise diverge, and costs 4 to 30 per cent. It is not the default, because the difference it removes is invisible next to the photon statistics. Reach for it when comparing CPU and GPU maps against each other directly, not for ordinary fitting.
+
+Both kernels ran every case with no failures, and pixels that used all 200 iterations had their state saved and resumed across launches, which is the part the watchdog logic depends on.
+
+It was slower than the C kernel on that machine, in every case:
+
+| Pixels, 256 bins, 2-exp | C, 48 threads | CUDA, one A5000 |
+|---|---|---|
+| 4,096 | 6.21 µs/px | 69.44 µs/px |
+| 65,536 | 2.81 µs/px | 9.99 µs/px |
+| 262,144 | 2.67 µs/px | 5.11 µs/px |
+
+Two things drive that. The fit is float64, and an A5000 runs double precision at a small fraction of its single-precision rate, so the card is working with one hand tied. And 48 cores is a lot of CPU to beat. The gap closes as the batch grows, from 11x down to 1.9x, which is the fixed per-launch cost being amortised.
+
+Where it should win is the machine most people actually have: a few CPU cores next to a decent card. That has not been measured. Build it and compare before assuming either way, and if the GPU loses, `--no-cuda` or deleting the CUDA library leaves the C kernel in charge.
 
 ## Licence
 
