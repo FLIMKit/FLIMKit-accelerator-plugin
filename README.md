@@ -57,7 +57,7 @@ That is the pattern for adding more kernels: write the C, add a method on `CFixe
 
 To compare it against the built-in backends without uninstalling it, set `FLIMKIT_FIT_BACKEND` to `cuda`, `mlx`, `cpu` or `accelerator`.
 
-`__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 3 as of the free-lifetime kernel.
+The add-on's version is `__version__` in `__init__.py`, and it shows in the Progress log when the backend is picked, so a user can say which build they have without unzipping anything. Separately, `__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 3 as of the free-lifetime kernel.
 
 `FLIMKIT_C_THREADS` caps the CPU pool. Threads take 256-pixel chunks from a shared counter rather than one block each, because slow pixels cluster in real images.
 

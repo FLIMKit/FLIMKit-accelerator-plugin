@@ -8,6 +8,7 @@ from flimkit.FLIM.fit_tools import TAU_FIT_UNIT_S, calibrated_from_terms
 from flimkit.GPU import PluginBackend
 from flimkit.plugins import fit_backend
 
+__version__ = '0.1.0'
 FLIMKIT_PLUGIN_API = 1
 ABI_VERSION = 3
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +78,7 @@ class CKernels(PluginBackend):
 
     def __repr__(self):
         where = 'cuda+cpu' if self._cuda is not None else 'cpu'
-        return ('CKernels(' + where + ', threads='
+        return ('CKernels(' + __version__ + ', ' + where + ', threads='
                 + str(self._lib.flimkit_c_threads()) + ')')
 
     def batch_fixed_tau(self, stack, A, taus_fixed, min_photons, correct_pileup,
@@ -188,7 +189,8 @@ class CKernels(PluginBackend):
             progress_callback(valid_idx.size, valid_idx.size)
         return maps
 
-@fit_backend('accelerator', 'FLIMKit accelerator: C fixed-tau and free-tau (ctypes)',
+@fit_backend('accelerator',
+             'FLIMKit accelerator ' + __version__ + ': C fixed-tau and free-tau (ctypes)',
              priority=100)
 def make_backend():
     lib = load_library()
