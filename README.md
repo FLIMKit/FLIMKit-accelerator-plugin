@@ -28,10 +28,12 @@ That needs a C compiler:
 
 - **Linux:** gcc or clang.
 - **macOS:** the Xcode command line tools.
-- **Windows:** MSVC, run from a Developer Command Prompt.
+- **Windows:** `pip install ziglang`, which carries its own C compiler and Windows C runtime, so Visual Studio is not needed. MSVC works too if you have it. Zig's first Windows build takes a few minutes while it builds that runtime, and seconds after.
 - **CUDA, optional:** nvcc from the CUDA toolkit. `build.py` builds the GPU kernel when it finds nvcc and skips it otherwise, so nothing breaks without it. `--no-cuda` skips it anyway.
 
 No Python headers are needed, and nothing has to be installed for the threads.
+
+Or skip the compiler. `.github/workflows/build.yml` builds the libraries for Linux x86_64 and aarch64, Windows x86_64 and arm64, and one universal2 for macOS, and attaches a drop-in folder per platform to the release. Download the one for your machine, unzip it into `~/.flimkit/plugins/`, and there is nothing to build. The CUDA library is built there too, for Pascal through Hopper with a PTX fallback for anything newer, so a card needs only its driver and no toolkit.
 
 Then tick "Load from ~/.flimkit/plugins" in `File > Preferences > Plugins` and restart. The Progress log says `using add-on fit backend 'accelerator'` on the first fit.
 

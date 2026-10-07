@@ -1,0 +1,172 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  # Pascal through Hopper, 2016 to 2022, plus compute_90 PTX so a newer card
+  # builds its own code on first use. sm_60 and sm_70 are deprecated in CUDA 12
+  # and still compile, and GTX 10 series cards are still in use. Blackwell
+  # needs CUDA 12.8 to get its own sm_100, so it comes off the PTX until then.
+  GENCODE: >-
+    -gencode arch=compute_60,code=sm_60
+    -gencode arch=compute_61,code=sm_61
+    -gencode arch=compute_70,code=sm_70
+    -gencode arch=compute_75,code=sm_75
+    -gencode arch=compute_80,code=sm_80
+    -gencode arch=compute_86,code=sm_86
+    -gencode arch=compute_89,code=sm_89
+    -gencode arch=compute_90,code=sm_90
+    -gencode arch=compute_90,code=compute_90
+
+jobs:
+  cpu-zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install ziglang
+      - run: mkdir -p out/linux-x86_64 out/linux-aarch64 out/windows-x86_64 out/windows-arm64
+      - name: linux x86_64
+        run: >-
+          python -m ziglang cc -O3 -fPIC -shared -target x86_64-linux-gnu.2.17
+          flimkit_accelerator_plugin/kernels.c
+          -o out/linux-x86_64/libflimkit_accelerator.so -lm
+      - name: linux aarch64
+        run: >-
+          python -m ziglang cc -O3 -fPIC -shared -target aarch64-linux-gnu.2.17
+          flimkit_accelerator_plugin/kernels.c
+          -o out/linux-aarch64/libflimkit_accelerator.so -lm
+      - name: windows x86_64
+        run: >-
+          python -m ziglang cc -O3 -shared -target x86_64-windows-gnu
+          flimkit_accelerator_plugin/kernels.c
+          -o out/windows-x86_64/flimkit_accelerator.dll
+      - name: windows arm64
+        continue-on-error: true
+        run: >-
+          python -m ziglang cc -O3 -shared -target aarch64-windows-gnu
+          flimkit_accelerator_plugin/kernels.c
+          -o out/windows-arm64/flimkit_accelerator.dll
+      - name: Load the native library and call it
+        run: |
+          python - <<'PY'
+          import ctypes
+          lib = ctypes.CDLL('out/linux-x86_64/libflimkit_accelerator.so')
+          print('abi', lib.flimkit_c_abi_version(), 'threads', lib.flimkit_c_threads())
+          assert lib.flimkit_c_abi_version() == 3
+          PY
+      - name: Drop any target that did not build
+        run: find out -type d -empty -delete
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-zig
+          path: out/
+
+  cpu-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: One universal2 library
+        run: |
+          mkdir -p out/macos-universal2
+          cc -O3 -fPIC -dynamiclib -arch arm64 -arch x86_64 \
+             flimkit_accelerator_plugin/kernels.c \
+             -o out/macos-universal2/libflimkit_accelerator.dylib -lm
+          lipo -info out/macos-universal2/libflimkit_accelerator.dylib
+      - name: Load it and call it
+        run: |
+          python3 - <<'PY'
+          import ctypes
+          lib = ctypes.CDLL('out/macos-universal2/libflimkit_accelerator.dylib')
+          print('abi', lib.flimkit_c_abi_version(), 'threads', lib.flimkit_c_threads())
+          assert lib.flimkit_c_abi_version() == 3
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpu-macos
+          path: out/
+
+  cuda:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x86_64
+            out: libflimkit_accelerator_cuda.so
+            pic: -Xcompiler -fPIC
+          - os: windows-latest
+            slug: windows-x86_64
+            out: flimkit_accelerator_cuda.dll
+            pic: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.0'
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+      - name: Build it
+        shell: bash
+        run: |
+          mkdir -p out/${{ matrix.slug }}
+          nvcc --version
+          nvcc -O3 -shared -cudart static -Wno-deprecated-gpu-targets \
+               ${{ env.GENCODE }} ${{ matrix.pic }} \
+               flimkit_accelerator_plugin/kernels.cu \
+               -o out/${{ matrix.slug }}/${{ matrix.out }}
+      - name: Say which architectures are inside it
+        shell: bash
+        run: cuobjdump --list-elf out/${{ matrix.slug }}/${{ matrix.out }} || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-${{ matrix.slug }}
+          path: out/
+
+  package:
+    needs: [cpu-zig, cpu-macos, cuda]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: libs
+      - name: One drop-in folder per platform
+        run: |
+          set -eux
+          mkdir -p dist
+          for slug in linux-x86_64 linux-aarch64 windows-x86_64 windows-arm64 macos-universal2; do
+            found=$(find libs -type d -name "$slug" | head -1)
+            [ -n "$found" ] || continue
+            stage=stage/$slug/flimkit_accelerator_plugin
+            mkdir -p "$stage"
+            cp flimkit_accelerator_plugin/__init__.py "$stage"/
+            cp flimkit_accelerator_plugin/kernels.c "$stage"/
+            cp flimkit_accelerator_plugin/kernels.cu "$stage"/
+            for other in $(find libs -type d -name "$slug"); do cp "$other"/* "$stage"/; done
+            cp README.md LICENSE.md stage/$slug/
+            (cd stage/$slug && zip -qr "$GITHUB_WORKSPACE/dist/flimkit-accelerator-$slug.zip" .)
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
