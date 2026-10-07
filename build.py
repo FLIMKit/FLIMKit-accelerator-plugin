@@ -59,12 +59,18 @@ def build_cuda():
     if nvcc is None:
         print('No nvcc on PATH, skipping the CUDA kernel. The add-on fits on the CPU.')
         return None
-    cmd = [nvcc, '-O3', '-shared', '-o', out]
+    base = [nvcc, '-O3', '-shared', '-o', out]
     if sys.platform != 'win32':
-        cmd += ['-Xcompiler', '-fPIC']
-    cmd.append(CU_SRC)
-    print('$ ' + ' '.join(cmd))
-    if subprocess.run(cmd).returncode != 0:
+        base += ['-Xcompiler', '-fPIC']
+    attempts = [base[:1] + ['-arch=native'] + base[1:] + [CU_SRC], base + [CU_SRC]]
+    for i, cmd in enumerate(attempts):
+        print('$ ' + ' '.join(cmd))
+        if subprocess.run(cmd).returncode == 0:
+            break
+        if i + 1 < len(attempts):
+            print('  -arch=native needs CUDA 11.5 and a visible card, '
+                  'building for the default architecture with a PTX fallback')
+    else:
         print('CUDA build failed, leaving the add-on on the CPU kernel.')
         return None
     lib = ctypes.CDLL(out)

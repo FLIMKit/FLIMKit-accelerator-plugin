@@ -29,7 +29,7 @@ That needs a C compiler:
 - **Linux:** gcc or clang.
 - **macOS:** the Xcode command line tools.
 - **Windows:** `pip install ziglang`, which carries its own C compiler and Windows C runtime, so Visual Studio is not needed. MSVC works too if you have it. Zig's first Windows build takes a few minutes while it builds that runtime, and seconds after.
-- **CUDA, optional:** nvcc from the CUDA toolkit. `build.py` builds the GPU kernel when it finds nvcc and skips it otherwise, so nothing breaks without it. `--no-cuda` skips it anyway.
+- **CUDA, optional:** nvcc from the CUDA toolkit. `build.py` builds the GPU kernel when it finds nvcc and skips it otherwise, so nothing breaks without it. `--no-cuda` skips it anyway. A local build uses `-arch=native`, so it compiles for the cards in that machine and nothing else, which is what you want on hardware the CI matrix does not cover, a Jetson for instance. Without a visible card it falls back to nvcc's default, which is an sm_52 binary plus PTX that every newer card has to compile for itself on first load.
 
 No Python headers are needed, and nothing has to be installed for the threads.
 
