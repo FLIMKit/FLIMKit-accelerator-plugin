@@ -1,12 +1,3 @@
-"""Compile the C fit backend and, optionally, install it as a FLIMKit add-on.
-
-    python build.py              # build into flimkit_accelerator_plugin/
-    python build.py --install    # build, then copy the folder into ~/.flimkit/plugins
-    python build.py --no-cuda    # skip the CUDA kernel even when nvcc is present
-
-The kernel threads itself with pthreads, so there is nothing to install first
-and no OpenMP flag. FLIMKIT_C_THREADS caps the pool at run time.
-"""
 import argparse
 import ctypes
 import os
@@ -78,22 +69,25 @@ def build_cuda():
           + str(lib.flimkit_cu_available() == 1) + ')')
     return out
 
-def install():
-    dest = os.path.expanduser('~') + os.sep + '.flimkit' + os.sep + 'plugins' + os.sep + 'flimkit_accelerator_plugin'
+def install(plugin_dir=None):
+    if plugin_dir == None:
+        plugin_dir = os.path.expanduser('~') + os.sep + '.flimkit' + os.sep + 'plugins'
+    dest = os.path.abspath(os.path.expanduser(plugin_dir)) + os.sep + 'flimkit_accelerator_plugin'
     if os.path.isdir(dest) == True:
         shutil.rmtree(dest)
     shutil.copytree(PKG, dest, ignore=shutil.ignore_patterns('__pycache__'))
     print('Installed to ' + dest)
-    print('Tick "Load from ~/.flimkit/plugins" in File > Preferences > Plugins and restart.')
+    print('Tick "Load from ' + os.path.dirname(dest) + '" in File > Preferences > Plugins and restart.')
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--install', action='store_true')
+    ap.add_argument('--plugin-dir', help='plugins folder to install into (implies --install)')
     ap.add_argument('--no-cuda', action='store_true')
     args = ap.parse_args()
     build()
     if args.no_cuda == False:
         build_cuda()
-    if args.install == True:
-        install()
+    if args.install == True or args.plugin_dir != None:
+        install(args.plugin_dir)

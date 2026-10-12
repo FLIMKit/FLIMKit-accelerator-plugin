@@ -24,6 +24,17 @@ cd flimkit-accelerator-plugin
 python build.py --install
 ```
 
+`build.py` takes these options:
+
+```bash
+python build.py              # build into flimkit_accelerator_plugin/
+python build.py --install    # build, then copy the folder into ~/.flimkit/plugins
+python build.py --plugin-dir DIR   # build, then copy the folder into DIR instead
+python build.py --no-cuda    # skip the CUDA kernel even when nvcc is present
+```
+
+The kernel threads itself with pthreads, so there is nothing to install first and no OpenMP flag. `FLIMKIT_C_THREADS` caps the pool at run time.
+
 That needs a C compiler:
 
 - **Linux:** gcc or clang.
