@@ -24,15 +24,25 @@ def cuda_target():
 
 def compile_command(out):
     if sys.platform == 'win32':
-        return ['cl', '/nologo', '/O2', '/LD', SRC, '/Fe:' + out]
-    cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
+        cl_path = shutil.which('cl')
+        if cl_path is not None:
+            print("Found MSVC 'cl' compiler. Compiling with cl...")
+            return ['cl', '/nologo', '/O2', '/LD', SRC, '/Fe:' + out]
+    cc = os.environ.get('CC') or shutil.which('zig') or shutil.which('cc') or shutil.which('gcc') or shutil.which('clang') 
     if cc is None:
-        sys.exit('No C compiler found. Install gcc or clang, or set CC.')
+        sys.exit('No C compiler found. Install Visual Studio Build Tools, Zig, gcc, or clang.')
+    if 'zig' in cc.lower():
+        print("MSVC 'cl' not found. Falling back to 'zig cc'...")
+        cmd = [cc, 'cc', '-O3', '-shared', SRC, '-o', out, '-lm']
+        if sys.platform != 'darwin':
+            cmd.insert(2, '-pthread')
+        return cmd
     shared = ['-dynamiclib'] if sys.platform == 'darwin' else ['-shared']
     cmd = [cc, '-O3', '-fPIC', *shared, SRC, '-o', out, '-lm']
     if sys.platform != 'darwin':
         cmd.insert(1, '-pthread')
     return cmd
+
 
 def build():
     out = PKG + os.sep + target()
