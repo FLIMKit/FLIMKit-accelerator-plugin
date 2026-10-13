@@ -22,6 +22,47 @@ def cuda_target():
         return 'flimkit_accelerator_cuda.dll'
     return 'libflimkit_accelerator_cuda.so'
 
+
+def cuda_arch_flags():
+    env = os.environ.get('CUDA_ARCHS')
+    if env is not None and env.strip() != '':
+        caps = [part.strip() for part in env.split(',') if part.strip()]
+    else:
+        nvidia_smi = shutil.which('nvidia-smi')
+        caps = []
+        if nvidia_smi is not None:
+            try:
+                out = subprocess.run([
+                    nvidia_smi,
+                    '--query-gpu=compute_cap',
+                    '--format=csv,noheader'],
+                    capture_output=True, text=True, check=True).stdout
+                caps = [cap.strip() for cap in out.splitlines() if cap.strip()]
+            except Exception:
+                caps = []
+    if len(caps) == 0:
+        return []
+    unique = []
+    seen = set()
+    for cap in caps:
+        cap = cap.strip()
+        if cap in seen:
+            continue
+        seen.add(cap)
+        unique.append(cap)
+    unique.sort(key=lambda v: tuple(int(part) for part in v.split('.') if part.isdigit()))
+    flags = []
+    for cap in unique:
+        major, minor = [int(part) for part in cap.split('.')[:2]]
+        cc = str(major) + str(minor)
+        sm = 'sm_' + cc
+        flags.append('-gencode=arch=compute_' + cc + ',code=' + sm)
+        flags.append('-gencode=arch=compute_' + cc + ',code=compute_' + cc)
+    if len(flags) > 0:
+        return flags
+    return []
+
+
 def compile_command(out):
     if sys.platform == 'win32':
         cl_path = shutil.which('cl')
@@ -60,17 +101,21 @@ def build_cuda():
     if nvcc is None:
         print('No nvcc on PATH, skipping the CUDA kernel. The add-on fits on the CPU.')
         return None
+    arch_flags = cuda_arch_flags()
     base = [nvcc, '-O3', '-shared', '-o', out]
     if sys.platform != 'win32':
         base += ['-Xcompiler', '-fPIC']
-    attempts = [base[:1] + ['-arch=native'] + base[1:] + [CU_SRC], base + [CU_SRC]]
+    attempts = []
+    if len(arch_flags) > 0:
+        attempts.append(base + arch_flags + [CU_SRC])
+    attempts.append(base + [CU_SRC])
     for i, cmd in enumerate(attempts):
         print('$ ' + ' '.join(cmd))
         if subprocess.run(cmd).returncode == 0:
             break
         if i + 1 < len(attempts):
-            print('  -arch=native needs CUDA 11.5 and a visible card, '
-                  'building for the default architecture with a PTX fallback')
+            print('  GPU arch flags did not work for this CUDA install, '
+                  'building for the toolkit default instead')
     else:
         print('CUDA build failed, leaving the add-on on the CPU kernel.')
         return None
