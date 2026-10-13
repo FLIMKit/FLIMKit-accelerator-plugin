@@ -71,6 +71,55 @@ def load_library(path=None):
 
 MAX_EXP = 3
 
+
+def _fixed_tau_python(decay, bg, A, fit_idx=None):
+    decay = np.ascontiguousarray(decay, dtype=np.float32)
+    bg = np.ascontiguousarray(bg, dtype=np.float32)
+    A = np.ascontiguousarray(A, dtype=np.float64)
+    if fit_idx is None:
+        idx = np.arange(A.shape[0], dtype=np.int64)
+    else:
+        idx = np.asarray(fit_idx, dtype=np.int64)
+    A_fit = np.ascontiguousarray(A[idx], dtype=np.float64)
+    n_pix = decay.shape[0]
+    n_bins = A_fit.shape[0]
+    n_exp = A_fit.shape[1]
+    a_pinv = np.ascontiguousarray(np.linalg.pinv(A_fit), dtype=np.float64)
+    amps = np.empty((n_pix, n_exp), dtype=np.float64)
+    numerator = np.empty(n_pix, dtype=np.float64)
+    expected = np.empty(n_pix, dtype=np.float64)
+    valid = np.empty(n_pix, dtype=np.uint8)
+    for p in range(n_pix):
+        d = decay[p]
+        b = float(bg[p])
+        amp = np.empty(n_exp, dtype=np.float64)
+        for e in range(n_exp):
+            row = a_pinv[e]
+            s = 0.0
+            for k in range(n_bins):
+                c = float(d[k]) - b
+                s += float(row[k]) * (c if c > 0.0 else 0.0)
+            amp[e] = s if s > 0.0 else 0.0
+        num = 0.0
+        exp_sum = 0.0
+        ok = 1
+        for k in range(n_bins):
+            m = b
+            for e in range(n_exp):
+                m += float(amp[e]) * float(A_fit[k, e])
+            dk = float(d[k])
+            if (not np.isfinite(dk)) or dk < 0.0 or (not np.isfinite(m)) or m < 0.0:
+                ok = 0
+            r = dk - m
+            num += r * r / (m if m > 1.0 else 1.0)
+            exp_sum += m if m < 1.0 else 1.0
+        amps[p] = amp
+        numerator[p] = num
+        expected[p] = exp_sum
+        valid[p] = ok
+    return amps, numerator, expected, valid
+
+
 class CKernels(PluginBackend):
     def __init__(self, lib, cuda=None):
         self._lib = lib
@@ -84,7 +133,7 @@ class CKernels(PluginBackend):
     def batch_fixed_tau(self, stack, A, taus_fixed, min_photons, correct_pileup,
                         n_sync_px, progress_callback=None, tvb_profile=None,
                         fit_tvb=False, fit_idx=None, **kwargs):
-        if fit_idx is not None or (fit_tvb == True and tvb_profile is not None) or \
+        if (fit_tvb == True and tvb_profile is not None) or \
                 (correct_pileup == True and n_sync_px > 0):
             return None
         ny, nx, n_bins = stack.shape
@@ -96,20 +145,28 @@ class CKernels(PluginBackend):
         if valid_idx.size == 0:
             return maps
         decay = np.ascontiguousarray(raw[valid_idx], dtype=np.float32)
+        if fit_idx is not None:
+            idx = np.asarray(fit_idx, dtype=np.int64)
+            if idx.size == 0:
+                return maps
+            decay = np.ascontiguousarray(decay[:, idx], dtype=np.float32)
+            A_used = np.ascontiguousarray(A[idx], dtype=np.float64)
+        else:
+            A_used = np.ascontiguousarray(A, dtype=np.float64)
         bg = np.ascontiguousarray(
             self._estimate_bg_batch(decay, np.ones(decay.shape[0], dtype=bool)),
             dtype=np.float32)
-        a = np.ascontiguousarray(A, dtype=np.float64)
+        a = np.ascontiguousarray(A_used, dtype=np.float64)
         a_pinv = np.ascontiguousarray(np.linalg.pinv(a), dtype=np.float64)
         n = decay.shape[0]
         amps = np.empty((n, n_exp))
         numerator = np.empty(n)
         expected = np.empty(n)
         valid = np.empty(n, dtype=np.uint8)
-        self._lib.flimkit_c_fixed_tau(decay, bg, n, n_bins, a_pinv, a, n_exp,
+        self._lib.flimkit_c_fixed_tau(decay, bg, n, decay.shape[1], a_pinv, a, n_exp,
                                       amps, numerator, expected, valid)
         self._scatter_fixed_tau(maps, valid_idx=valid_idx, amps=amps, bg=bg,
-                                decay_valid=decay, A=A, taus_ns=taus_fixed * 1e9,
+                                decay_valid=decay, A=A_used, taus_ns=taus_fixed * 1e9,
                                 ny=ny, nx=nx,
                                 chi2_parts=(numerator, expected, valid.astype(bool)))
         if progress_callback is not None:
