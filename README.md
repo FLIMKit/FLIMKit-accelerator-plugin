@@ -4,6 +4,8 @@ A [FLIMKit](https://github.com/FLIMKit/FLIMKit) fit backend written in C and loa
 
 It runs fixed-lifetime per-pixel fits: background subtraction, projection onto the fixed-lifetime basis, clamped amplitudes and the χ² terms, one pixel per loop iteration, on every core. The maps match FLIMKit's own CPU path to rounding (about 1e-15 relative). On a synthetic 512×512×256 stack with 4 threads it took 1–3 s against 50–56 s for FLIMKit's CPU path (19–51× across runs on a shared machine). It has not been compared against FLIMKit's GPU backends yet.
 
+It also runs FLIMKit's Poisson fixed-lifetime fit, which is FLIMKit's default estimator now: amplitudes and a constant offset by maximum likelihood, EM over the non-zero bins, one pixel per loop iteration. FLIMKit asks the backend first and uses its own numba fit when the backend declines, which it does for more than three components. On a Leica R 142 tile (201,913 pixels, 528 bins, three components) on a 10-core Mac the C kernel took 0.70 s against 1.37 s for FLIMKit's numba fit, and the maps agree to 1e-11 relative. `kernels.cu` has the same kernel for an NVIDIA card. I have not built or run that one, because there is no nvcc on the machine I wrote it on.
+
 The threads are pthreads, or `CreateThread` on Windows, and not OpenMP. PyTorch carries its own OpenMP runtime, and a second one in the same process aborts it: an OpenMP build of this kernel died with `OMP: Error #15` whichever order the two were loaded in, measured on macOS with Homebrew's libomp. That is an abort, not an exception, so nothing can catch it and the FLIMKit window goes with it. Dropping OpenMP costs about 8 per cent on this kernel, 33.8 ms against 31.3 ms for 262,144 pixels at 256 bins on a 10-core M4, and the fitted amplitudes are bit-identical. `FLIMKIT_C_THREADS` caps the pool, and one thread takes 162.1 ms on the same data.
 
 Requires a FLIMKit with the `@fit_backend` hook.
@@ -68,7 +70,7 @@ That is the pattern for adding more kernels: write the C, add a method on `CFixe
 
 To compare it against the built-in backends without uninstalling it, set `FLIMKIT_FIT_BACKEND` to `cuda`, `mlx`, `cpu` or `accelerator`.
 
-The add-on's version is `__version__` in `__init__.py`, and it shows in the Progress log when the backend is picked, so a user can say which build they have without unzipping anything. Separately, `__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 3 as of the free-lifetime kernel.
+The add-on's version is `__version__` in `__init__.py`, and it shows in the Progress log when the backend is picked, so a user can say which build they have without unzipping anything. Separately, `__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 4 as of the Poisson fixed-lifetime kernel.
 
 `FLIMKIT_C_THREADS` caps the CPU pool. Threads take 256-pixel chunks from a shared counter rather than one block each, because slow pixels cluster in real images.
 

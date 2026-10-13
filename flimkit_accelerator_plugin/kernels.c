@@ -1,6 +1,9 @@
 /* FLIMKit add-on fit kernels in C, loaded through ctypes.
  *
  * flimkit_c_fixed_tau: fixed-lifetime projection, one pixel per iteration.
+ * flimkit_c_fixed_tau_poisson: the same fixed lifetimes, amplitudes and a constant
+ *                      offset by Poisson maximum likelihood (EM over the non-zero
+ *                      bins), one pixel per iteration.
  * flimkit_c_free_tau:  per-pixel free-lifetime reconvolution fit, up to three
  *                      exponentials, the same projected Levenberg-Marquardt and
  *                      the same step sequence as FLIMKit's numba kernel.
@@ -33,7 +36,7 @@
 #define MAX_P (2 * MAX_EXP)
 #define CHUNK 256
 
-EXPORT int flimkit_c_abi_version(void) { return 3; }
+EXPORT int flimkit_c_abi_version(void) { return 4; }
 
 static int cpu_count(void)
 {
@@ -260,6 +263,143 @@ EXPORT void flimkit_c_fixed_tau(
     g.expected = expected;
     g.valid = valid;
     parallel_for(fixed_chunk, NULL, &g, n_pix);
+}
+
+typedef struct {
+    const float *decay;
+    int64_t n_bins;
+    const double *a;
+    int64_t n_exp;
+    const double *colsum;
+    int64_t iters;
+    double tol;
+    double *amps;
+    double *offset;
+    double *numerator;
+    double *expected;
+    uint8_t *valid;
+} poisson_t;
+
+static void *poisson_local(void *work)
+{
+    const poisson_t *g = (const poisson_t *)work;
+    return malloc((size_t)g->n_bins * sizeof(int32_t));
+}
+
+static void poisson_chunk(void *work, void *local, int64_t lo, int64_t hi)
+{
+    const poisson_t *g = (const poisson_t *)work;
+    int32_t *idx = (int32_t *)local;
+    int64_t n_bins = g->n_bins, n_exp = g->n_exp, n_col = n_exp + 1;
+    double inv_bins = 1.0 / (double)n_bins;
+    for (int64_t p = lo; p < hi; p++) {
+        const float *d = g->decay + p * n_bins;
+        double *amp = g->amps + p * n_exp;
+        double a[MAX_EXP + 1], num[MAX_EXP + 1];
+        int64_t m = 0;
+        double tot = 0.0;
+        for (int64_t k = 0; k < n_bins; k++) {
+            if (d[k] > 0.0f) {
+                idx[m++] = (int32_t)k;
+                tot += d[k];
+            }
+        }
+        for (int64_t e = 0; e < n_exp; e++)
+            amp[e] = 0.0;
+        g->offset[p] = 0.0;
+        if (m == 0) {
+            g->numerator[p] = 0.0;
+            g->expected[p] = 0.0;
+            g->valid[p] = 0;
+            continue;
+        }
+        for (int64_t c = 0; c < n_col; c++)
+            a[c] = tot / (double)n_col / g->colsum[c];
+        for (int64_t it = 0; it < g->iters; it++) {
+            for (int64_t c = 0; c < n_col; c++)
+                num[c] = 0.0;
+            for (int64_t j = 0; j < m; j++) {
+                int64_t b = idx[j];
+                const double *row = g->a + b * n_exp;
+                double mu = a[n_exp] * inv_bins;
+                for (int64_t e = 0; e < n_exp; e++)
+                    mu += a[e] * row[e];
+                if (mu < 1e-12)
+                    mu = 1e-12;
+                double r = (double)d[b] / mu;
+                for (int64_t e = 0; e < n_exp; e++)
+                    num[e] += r * row[e];
+                num[n_exp] += r * inv_bins;
+            }
+            double dmax = 0.0;
+            for (int64_t c = 0; c < n_col; c++) {
+                double next = a[c] * num[c] / g->colsum[c];
+                double diff = fabs(next - a[c]) / (a[c] + 1e-12);
+                if (diff > dmax)
+                    dmax = diff;
+                a[c] = next;
+            }
+            if (dmax < g->tol)
+                break;
+        }
+        double b0 = a[n_exp] * inv_bins;
+        for (int64_t e = 0; e < n_exp; e++)
+            amp[e] = a[e];
+        g->offset[p] = b0;
+        double sq = 0.0, exp_sum = 0.0;
+        uint8_t ok = 1;
+        for (int64_t k = 0; k < n_bins; k++) {
+            double mm = b0;
+            for (int64_t e = 0; e < n_exp; e++)
+                mm += amp[e] * g->a[k * n_exp + e];
+            double dk = d[k];
+            if (!isfinite(dk) || dk < 0.0 || !isfinite(mm) || mm < 0.0)
+                ok = 0;
+            double r = dk - mm;
+            sq += r * r / (mm > 1.0 ? mm : 1.0);
+            exp_sum += mm < 1.0 ? mm : 1.0;
+        }
+        g->numerator[p] = sq;
+        g->expected[p] = exp_sum;
+        g->valid[p] = ok;
+    }
+}
+
+/* decay      n_pix x n_bins, float32, C order (raw counts)
+ * a          n_bins x n_exp, float64 (convolved basis), n_exp at most MAX_EXP
+ * amps       n_pix x n_exp, float64, written
+ * offset     n_pix, float64, written (constant per bin)
+ * numerator, expected  n_pix, float64, written
+ * valid      n_pix, uint8, written
+ * returns 0, or -1 for an unsupported n_exp, or -2 when memory ran out */
+EXPORT int flimkit_c_fixed_tau_poisson(
+    const float *decay, int64_t n_pix, int64_t n_bins, const double *a, int64_t n_exp,
+    int64_t iters, double tol,
+    double *amps, double *offset, double *numerator, double *expected, uint8_t *valid)
+{
+    if (n_exp < 1 || n_exp > MAX_EXP || n_bins < 1)
+        return -1;
+    double colsum[MAX_EXP + 1];
+    for (int64_t e = 0; e < n_exp; e++) {
+        colsum[e] = 0.0;
+        for (int64_t k = 0; k < n_bins; k++)
+            colsum[e] += a[k * n_exp + e];
+    }
+    colsum[n_exp] = 1.0;
+    poisson_t g;
+    g.decay = decay;
+    g.n_bins = n_bins;
+    g.a = a;
+    g.n_exp = n_exp;
+    g.colsum = colsum;
+    g.iters = iters;
+    g.tol = tol;
+    g.amps = amps;
+    g.offset = offset;
+    g.numerator = numerator;
+    g.expected = expected;
+    g.valid = valid;
+    return parallel_for(poisson_chunk, poisson_local, &g, n_pix);
 }
 
 static void exp_conv(const double *irf, int64_t n, double r, double *y, double *z)

@@ -5,6 +5,9 @@
  * outlasts the Windows display watchdog, and finished pixels drop out between
  * launches. The step sequence is the one in kernels.c, so the lifetimes match.
  *
+ * flimkit_cu_fixed_tau_poisson is the Poisson maximum-likelihood fixed-lifetime
+ * fit from kernels.c, one thread per pixel, run over pixels in bounded batches.
+ *
  * Built only when nvcc is on PATH. Without it the add-on fits on the CPU. */
 #include <math.h>
 #include <stdint.h>
@@ -22,7 +25,7 @@
 #define MAX_PP 36
 #define BLOCK 128
 
-extern "C" EXPORT int flimkit_cu_abi_version(void) { return 3; }
+extern "C" EXPORT int flimkit_cu_abi_version(void) { return 4; }
 
 extern "C" EXPORT int flimkit_cu_available(void)
 {
@@ -495,5 +498,181 @@ done:
     cudaFree(d_valid);
     cudaFree(d_flags);
     cudaFree(d_active);
+    return rc;
+}
+
+struct poisson_args {
+    const float *decay;
+    int *idx;
+    const double *a;
+    const double *colsum;
+    int n_bins;
+    int n_exp;
+    int iters;
+    double tol;
+};
+
+__global__ static void poisson_kernel(poisson_args g, int n, double *amps, double *offset,
+                                      double *numerator, double *expected, uint8_t *valid)
+{
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= n)
+        return;
+    int n_bins = g.n_bins, n_exp = g.n_exp, n_col = n_exp + 1;
+    double inv_bins = 1.0 / (double)n_bins;
+    const float *d = g.decay + (size_t)p * n_bins;
+    int *idx = g.idx + (size_t)p * n_bins;
+    double *amp = amps + (size_t)p * n_exp;
+    double a[MAX_EXP + 1], num[MAX_EXP + 1];
+    int m = 0;
+    double tot = 0.0;
+    for (int k = 0; k < n_bins; k++) {
+        if (d[k] > 0.0f) {
+            idx[m++] = k;
+            tot += d[k];
+        }
+    }
+    for (int e = 0; e < n_exp; e++)
+        amp[e] = 0.0;
+    offset[p] = 0.0;
+    if (m == 0) {
+        numerator[p] = 0.0;
+        expected[p] = 0.0;
+        valid[p] = 0;
+        return;
+    }
+    for (int c = 0; c < n_col; c++)
+        a[c] = tot / (double)n_col / g.colsum[c];
+    for (int it = 0; it < g.iters; it++) {
+        for (int c = 0; c < n_col; c++)
+            num[c] = 0.0;
+        for (int j = 0; j < m; j++) {
+            int b = idx[j];
+            const double *row = g.a + (size_t)b * n_exp;
+            double mu = a[n_exp] * inv_bins;
+            for (int e = 0; e < n_exp; e++)
+                mu += a[e] * row[e];
+            if (mu < 1e-12)
+                mu = 1e-12;
+            double r = (double)d[b] / mu;
+            for (int e = 0; e < n_exp; e++)
+                num[e] += r * row[e];
+            num[n_exp] += r * inv_bins;
+        }
+        double dmax = 0.0;
+        for (int c = 0; c < n_col; c++) {
+            double next = a[c] * num[c] / g.colsum[c];
+            double diff = fabs(next - a[c]) / (a[c] + 1e-12);
+            if (diff > dmax)
+                dmax = diff;
+            a[c] = next;
+        }
+        if (dmax < g.tol)
+            break;
+    }
+    double b0 = a[n_exp] * inv_bins;
+    for (int e = 0; e < n_exp; e++)
+        amp[e] = a[e];
+    offset[p] = b0;
+    double sq = 0.0, exp_sum = 0.0;
+    uint8_t ok = 1;
+    for (int k = 0; k < n_bins; k++) {
+        double mm = b0;
+        for (int e = 0; e < n_exp; e++)
+            mm += amp[e] * g.a[(size_t)k * n_exp + e];
+        double dk = d[k];
+        if (!isfinite(dk) || dk < 0.0 || !isfinite(mm) || mm < 0.0)
+            ok = 0;
+        double r = dk - mm;
+        sq += r * r / (mm > 1.0 ? mm : 1.0);
+        exp_sum += mm < 1.0 ? mm : 1.0;
+    }
+    numerator[p] = sq;
+    expected[p] = exp_sum;
+    valid[p] = ok;
+}
+
+/* Same arguments and the same meaning as flimkit_c_fixed_tau_poisson in kernels.c.
+ * Returns 0, -1 on a bad shape, -2 when host memory ran out, -3 on any CUDA
+ * failure, which hands the fit back so the caller can use the CPU kernel. */
+extern "C" EXPORT int flimkit_cu_fixed_tau_poisson(
+    const float *decay, int64_t n_pix, int64_t n_bins, const double *a, int64_t n_exp,
+    int64_t iters, double tol,
+    double *amps, double *offset, double *numerator, double *expected, uint8_t *valid)
+{
+    if (n_exp < 1 || n_exp > MAX_EXP || n_bins < 1)
+        return -1;
+    int rc = 0;
+    double colsum[MAX_EXP + 1];
+    double *d_a = NULL, *d_colsum = NULL, *d_amps = NULL, *d_off = NULL;
+    double *d_num = NULL, *d_exp = NULL;
+    float *d_decay = NULL;
+    int *d_idx = NULL;
+    uint8_t *d_valid = NULL;
+    int64_t chunk = (int64_t)(192u * 1024u * 1024u) / (8 * n_bins);
+    if (chunk > 131072)
+        chunk = 131072;
+    if (chunk < BLOCK)
+        chunk = BLOCK;
+    if (chunk > n_pix)
+        chunk = n_pix;
+    for (int64_t e = 0; e < n_exp; e++) {
+        colsum[e] = 0.0;
+        for (int64_t k = 0; k < n_bins; k++)
+            colsum[e] += a[k * n_exp + e];
+    }
+    colsum[n_exp] = 1.0;
+    CHECK(cudaMalloc(&d_a, (size_t)(n_bins * n_exp) * sizeof(double)));
+    CHECK(cudaMalloc(&d_colsum, (size_t)(n_exp + 1) * sizeof(double)));
+    CHECK(cudaMalloc(&d_decay, (size_t)(chunk * n_bins) * sizeof(float)));
+    CHECK(cudaMalloc(&d_idx, (size_t)(chunk * n_bins) * sizeof(int)));
+    CHECK(cudaMalloc(&d_amps, (size_t)(chunk * n_exp) * sizeof(double)));
+    CHECK(cudaMalloc(&d_off, (size_t)chunk * sizeof(double)));
+    CHECK(cudaMalloc(&d_num, (size_t)chunk * sizeof(double)));
+    CHECK(cudaMalloc(&d_exp, (size_t)chunk * sizeof(double)));
+    CHECK(cudaMalloc(&d_valid, (size_t)chunk));
+    CHECK(cudaMemcpy(d_a, a, (size_t)(n_bins * n_exp) * sizeof(double), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_colsum, colsum, (size_t)(n_exp + 1) * sizeof(double),
+                     cudaMemcpyHostToDevice));
+    for (int64_t first = 0; first < n_pix; first += chunk) {
+        int64_t part = n_pix - first < chunk ? n_pix - first : chunk;
+        poisson_args g;
+        g.decay = d_decay;
+        g.idx = d_idx;
+        g.a = d_a;
+        g.colsum = d_colsum;
+        g.n_bins = (int)n_bins;
+        g.n_exp = (int)n_exp;
+        g.iters = (int)iters;
+        g.tol = tol;
+        CHECK(cudaMemcpy(d_decay, decay + first * n_bins, (size_t)(part * n_bins) * sizeof(float),
+                         cudaMemcpyHostToDevice));
+        int grid = (int)((part + BLOCK - 1) / BLOCK);
+        poisson_kernel<<<grid, BLOCK>>>(g, (int)part, d_amps, d_off, d_num, d_exp, d_valid);
+        CHECK(cudaDeviceSynchronize());
+        if (cudaGetLastError() != cudaSuccess) {
+            rc = -3;
+            goto done;
+        }
+        CHECK(cudaMemcpy(amps + first * n_exp, d_amps, (size_t)(part * n_exp) * sizeof(double),
+                         cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(offset + first, d_off, (size_t)part * sizeof(double),
+                         cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(numerator + first, d_num, (size_t)part * sizeof(double),
+                         cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(expected + first, d_exp, (size_t)part * sizeof(double),
+                         cudaMemcpyDeviceToHost));
+        CHECK(cudaMemcpy(valid + first, d_valid, (size_t)part, cudaMemcpyDeviceToHost));
+    }
+done:
+    cudaFree(d_a);
+    cudaFree(d_colsum);
+    cudaFree(d_decay);
+    cudaFree(d_idx);
+    cudaFree(d_amps);
+    cudaFree(d_off);
+    cudaFree(d_num);
+    cudaFree(d_exp);
+    cudaFree(d_valid);
     return rc;
 }

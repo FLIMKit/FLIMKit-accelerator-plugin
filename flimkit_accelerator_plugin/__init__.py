@@ -10,7 +10,7 @@ from flimkit.plugins import fit_backend
 
 __version__ = '0.1.0'
 FLIMKIT_PLUGIN_API = 1
-ABI_VERSION = 3
+ABI_VERSION = 4
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def library_name():
@@ -45,6 +45,10 @@ def load_cuda_library(path=None):
     lib.flimkit_cu_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
                                         f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
     lib.flimkit_cu_free_tau.restype = ctypes.c_int
+    f32 = np.ctypeslib.ndpointer(np.float32, flags='C_CONTIGUOUS')
+    lib.flimkit_cu_fixed_tau_poisson.argtypes = [f32, i64, i64, f64, i64, i64, f,
+                                                 f64, f64, f64, f64, u8]
+    lib.flimkit_cu_fixed_tau_poisson.restype = ctypes.c_int
     return lib
 
 def load_library(path=None):
@@ -64,6 +68,9 @@ def load_library(path=None):
     f = ctypes.c_double
     lib.flimkit_c_fixed_tau.argtypes = [f32, f32, i64, i64, f64, f64, i64, f64, f64, f64, u8]
     lib.flimkit_c_fixed_tau.restype = None
+    lib.flimkit_c_fixed_tau_poisson.argtypes = [f32, i64, i64, f64, i64, i64, f,
+                                                f64, f64, f64, f64, u8]
+    lib.flimkit_c_fixed_tau_poisson.restype = ctypes.c_int
     lib.flimkit_c_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
                                        f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
     lib.flimkit_c_free_tau.restype = ctypes.c_int
@@ -121,6 +128,8 @@ def _fixed_tau_python(decay, bg, A, fit_idx=None):
 
 
 class CKernels(PluginBackend):
+    estimators = ('nnls', 'poisson')
+
     def __init__(self, lib, cuda=None):
         self._lib = lib
         self._cuda = cuda
@@ -132,9 +141,13 @@ class CKernels(PluginBackend):
 
     def batch_fixed_tau(self, stack, A, taus_fixed, min_photons, correct_pileup,
                         n_sync_px, progress_callback=None, tvb_profile=None,
-                        fit_tvb=False, fit_idx=None, **kwargs):
+                        fit_tvb=False, fit_idx=None, estimator='nnls', **kwargs):
         if (fit_tvb == True and tvb_profile is not None) or \
                 (correct_pileup == True and n_sync_px > 0):
+            return None
+        if estimator not in self.estimators:
+            return None
+        if estimator == 'poisson' and A.shape[1] > MAX_EXP:
             return None
         ny, nx, n_bins = stack.shape
         n_exp = A.shape[1]
@@ -153,6 +166,9 @@ class CKernels(PluginBackend):
             A_used = np.ascontiguousarray(A[idx], dtype=np.float64)
         else:
             A_used = np.ascontiguousarray(A, dtype=np.float64)
+        if estimator == 'poisson':
+            return self._fixed_tau_poisson(maps, valid_idx, decay, A_used, taus_fixed,
+                                           ny, nx, progress_callback, kwargs)
         bg = np.ascontiguousarray(
             self._estimate_bg_batch(decay, np.ones(decay.shape[0], dtype=bool)),
             dtype=np.float32)
@@ -166,6 +182,41 @@ class CKernels(PluginBackend):
         self._lib.flimkit_c_fixed_tau(decay, bg, n, decay.shape[1], a_pinv, a, n_exp,
                                       amps, numerator, expected, valid)
         self._scatter_fixed_tau(maps, valid_idx=valid_idx, amps=amps, bg=bg,
+                                decay_valid=decay, A=A_used, taus_ns=taus_fixed * 1e9,
+                                ny=ny, nx=nx,
+                                chi2_parts=(numerator, expected, valid.astype(bool)))
+        if progress_callback is not None:
+            progress_callback(valid_idx.size, valid_idx.size)
+        return maps
+
+    def _fixed_tau_poisson(self, maps, valid_idx, decay, A_used, taus_fixed, ny, nx,
+                           progress_callback, options):
+        n = decay.shape[0]
+        n_bins = decay.shape[1]
+        n_exp = A_used.shape[1]
+        a = np.ascontiguousarray(A_used, dtype=np.float64)
+        iters = int(options.get('poisson_iters', 1500))
+        tol = float(options.get('poisson_tol', 1e-7))
+        amps = np.empty((n, n_exp))
+        offset = np.empty(n)
+        numerator = np.empty(n)
+        expected = np.empty(n)
+        valid = np.empty(n, dtype=np.uint8)
+        rc = -1
+        if self._cuda is not None:
+            rc = self._cuda.flimkit_cu_fixed_tau_poisson(
+                decay, n, n_bins, a, n_exp, iters, tol,
+                amps, offset, numerator, expected, valid)
+            if rc != 0:
+                print('  [per-pixel] add-on CUDA Poisson fit failed (' + str(rc)
+                      + '), using the C kernel')
+        if rc != 0:
+            rc = self._lib.flimkit_c_fixed_tau_poisson(
+                decay, n, n_bins, a, n_exp, iters, tol,
+                amps, offset, numerator, expected, valid)
+        if rc != 0:
+            return None
+        self._scatter_fixed_tau(maps, valid_idx=valid_idx, amps=amps, bg=offset,
                                 decay_valid=decay, A=A_used, taus_ns=taus_fixed * 1e9,
                                 ny=ny, nx=nx,
                                 chi2_parts=(numerator, expected, valid.astype(bool)))
