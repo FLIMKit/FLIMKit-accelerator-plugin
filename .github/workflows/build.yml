@@ -62,7 +62,7 @@ jobs:
           import ctypes
           lib = ctypes.CDLL('out/linux-x86_64/libflimkit_accelerator.so')
           print('abi', lib.flimkit_c_abi_version(), 'threads', lib.flimkit_c_threads())
-          assert lib.flimkit_c_abi_version() == 3
+          assert lib.flimkit_c_abi_version() == 4
           PY
       - name: Drop any target that did not build
         run: find out -type d -empty -delete
@@ -88,7 +88,7 @@ jobs:
           import ctypes
           lib = ctypes.CDLL('out/macos-universal2/libflimkit_accelerator.dylib')
           print('abi', lib.flimkit_c_abi_version(), 'threads', lib.flimkit_c_threads())
-          assert lib.flimkit_c_abi_version() == 3
+          assert lib.flimkit_c_abi_version() == 4
           PY
       - uses: actions/upload-artifact@v4
         with:
