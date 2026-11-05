@@ -56,7 +56,7 @@ It has to be installed as a folder, not as a wheel. Python cannot load compiled 
 
 **Fixed lifetime.** Only the plain case: no fit window, background profile or pile-up correction. Everything else returns `None`, which hands the fit back to FLIMKit: to the GPU backend this one displaced, or to the CPU.
 
-**Free lifetime**, up to three exponentials, including a fit window and pile-up correction of the data. It declines a time-varying background, pile-up folded into the model, and more than three components. It is the same projected Levenberg-Marquardt as FLIMKit's numba kernel, step for step, so the two agree: on 16,384 pixels at 256 bins the lifetime, amplitude, fraction and χ² maps match to 1e-14 relative, and kernel against kernel on the same inputs the parameters sit 1.7e-12 apart with identical iteration counts.
+**Free lifetime**, up to three exponentials, including a fit window and pile-up correction of the data. It takes FLIMKit's incomplete-decay term, a laser pulse period that adds the decay left over from earlier pulses, and advertises that with `free_tau_rep_period`, so FLIMKit only sends a period to a build that models it. It declines a time-varying background, pile-up folded into the model, and more than three components. It is the same projected Levenberg-Marquardt as FLIMKit's numba kernel, step for step, so the two agree: on 16,384 pixels at 256 bins the lifetime, amplitude, fraction and χ² maps match to 1e-14 relative, and kernel against kernel on the same inputs the parameters sit 1.7e-12 apart with identical iteration counts.
 
 One-exponential scans and distribution fits are left to FLIMKit.
 
@@ -70,7 +70,7 @@ That is the pattern for adding more kernels: write the C, add a method on `CFixe
 
 To compare it against the built-in backends without uninstalling it, set `FLIMKIT_FIT_BACKEND` to `cuda`, `mlx`, `cpu` or `accelerator`.
 
-The add-on's version is `__version__` in `__init__.py`, and it shows in the Progress log when the backend is picked, so a user can say which build they have without unzipping anything. Separately, `__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 5 as of the Poisson free-lifetime fit, so a build from before it, which biased free-lifetime fits at low counts, is refused and FLIMKit fits on its own.
+The add-on's version is `__version__` in `__init__.py`, and it shows in the Progress log when the backend is picked, so a user can say which build they have without unzipping anything. Separately, `__init__.py` checks the library's ABI version and refuses one built by an older copy of `build.py`, so rerun `python build.py --install` after pulling. The ABI is 6 as of the incomplete-decay term, which added the pulse period to the free-lifetime kernels, so a build from before it is refused and FLIMKit fits on its own.
 
 `FLIMKIT_C_THREADS` caps the CPU pool. Threads take 256-pixel chunks from a shared counter rather than one block each, because slow pixels cluster in real images.
 

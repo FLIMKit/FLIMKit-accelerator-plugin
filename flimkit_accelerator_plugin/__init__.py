@@ -8,9 +8,9 @@ from flimkit.FLIM.fit_tools import TAU_FIT_UNIT_S, calibrated_from_terms
 from flimkit.GPU import PluginBackend
 from flimkit.plugins import fit_backend
 
-__version__ = '0.2.1'
+__version__ = '0.3.0'
 FLIMKIT_PLUGIN_API = 1
-ABI_VERSION = 5
+ABI_VERSION = 6
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def library_name():
@@ -42,7 +42,7 @@ def load_cuda_library(path=None):
     i32p = np.ctypeslib.ndpointer(np.int32, flags='C_CONTIGUOUS')
     i64 = ctypes.c_int64
     f = ctypes.c_double
-    lib.flimkit_cu_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
+    lib.flimkit_cu_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f, f,
                                         f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
     lib.flimkit_cu_free_tau.restype = ctypes.c_int
     f32 = np.ctypeslib.ndpointer(np.float32, flags='C_CONTIGUOUS')
@@ -71,7 +71,7 @@ def load_library(path=None):
     lib.flimkit_c_fixed_tau_poisson.argtypes = [f32, i64, i64, f64, i64, i64, f,
                                                 f64, f64, f64, f64, u8]
     lib.flimkit_c_fixed_tau_poisson.restype = ctypes.c_int
-    lib.flimkit_c_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f,
+    lib.flimkit_c_free_tau.argtypes = [f64, f64, f64, i64, i64, i64, f64, i64p, i64, f, f,
                                        f64, f64, f64, i64, f, f64, f64, i32p, f64, f64, u8]
     lib.flimkit_c_free_tau.restype = ctypes.c_int
     return lib
@@ -129,6 +129,7 @@ def _fixed_tau_python(decay, bg, A, fit_idx=None):
 
 class CKernels(PluginBackend):
     estimators = ('nnls', 'poisson')
+    free_tau_rep_period = True
 
     def __init__(self, lib, cuda=None):
         self._lib = lib
@@ -228,7 +229,7 @@ class CKernels(PluginBackend):
                            tau_max_s, n_exp, min_photons, correct_pileup, n_sync_px,
                            n_steps=50, lr=None, tvb_profile=None, fit_tvb=False,
                            fit_idx=None, n_sync_model=None, progress_callback=None,
-                           max_iter=200, tol=1e-8, **kwargs):
+                           max_iter=200, tol=1e-8, rep_period_s=None, bg_per_pixel=None, **kwargs):
         if n_exp < 1 or n_exp > MAX_EXP or n_sync_model is not None or \
                 (fit_tvb == True and tvb_profile is not None):
             return None
@@ -245,13 +246,26 @@ class CKernels(PluginBackend):
             from flimkit.FLIM.fit_tools import coates_pileup_correction
             data = np.ascontiguousarray(
                 [coates_pileup_correction(row, n_sync_px) for row in raw], dtype=np.float64)
-        bg = np.ascontiguousarray(
-            self._estimate_bg_batch(data.astype(np.float32),
-                                    np.ones(data.shape[0], dtype=bool)), dtype=np.float64)
+        if bg_per_pixel is not None:
+            bg = np.full(data.shape[0], float(bg_per_pixel))
+        else:
+            bg = np.ascontiguousarray(
+                self._estimate_bg_batch(data.astype(np.float32),
+                                        np.ones(data.shape[0], dtype=bool)), dtype=np.float64)
         idx = np.arange(n_bins) if fit_idx is None else np.asarray(fit_idx)
         idx = np.ascontiguousarray(idx, dtype=np.int64)
         irf = np.ascontiguousarray(irf_array, dtype=np.float64)
         dt = tcspc_res / TAU_FIT_UNIT_S
+        period_bins = 0.0
+        n_grid = n_bins
+        if rep_period_s:
+            from flimkit.FLIM.models import period_grid_bins
+            n_grid = period_grid_bins(rep_period_s, tcspc_res, n_bins)
+            period_bins = float(rep_period_s) / float(tcspc_res)
+            pad = ((0, 0), (0, n_grid - n_bins))
+            data = np.ascontiguousarray(np.pad(data, pad))
+            raw = np.ascontiguousarray(np.pad(raw, pad))
+            irf = np.ascontiguousarray(np.pad(irf, (0, n_grid - n_bins)))
         amp_hi = float(raw.max()) * 10.0
         p0 = np.ascontiguousarray(
             np.concatenate([taus_init / TAU_FIT_UNIT_S,
@@ -271,13 +285,13 @@ class CKernels(PluginBackend):
         rc = -1
         if self._cuda is not None:
             rc = self._cuda.flimkit_cu_free_tau(
-                data, raw, bg, n, n_bins, n_exp, irf, idx, idx.size, dt, p0, lo, hi,
+                data, raw, bg, n, n_grid, n_exp, irf, idx, idx.size, dt, period_bins, p0, lo, hi,
                 max_iter, tol, out_p, out_cost, out_iter, numerator, expected, valid)
             if rc != 0:
                 print('  [per-pixel] add-on CUDA free-tau failed (' + str(rc)
                       + '), using the C kernel')
         if rc != 0:
-            rc = call(data, raw, bg, n, n_bins, n_exp, irf, idx, idx.size, dt, p0, lo, hi,
+            rc = call(data, raw, bg, n, n_grid, n_exp, irf, idx, idx.size, dt, period_bins, p0, lo, hi,
                       max_iter, tol, out_p, out_cost, out_iter, numerator, expected, valid)
         if rc != 0:
             return None

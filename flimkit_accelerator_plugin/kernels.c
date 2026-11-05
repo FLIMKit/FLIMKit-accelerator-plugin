@@ -36,7 +36,7 @@
 #define MAX_P (2 * MAX_EXP)
 #define CHUNK 256
 
-EXPORT int flimkit_c_abi_version(void) { return 5; }
+EXPORT int flimkit_c_abi_version(void) { return 6; }
 
 static int cpu_count(void)
 {
@@ -420,6 +420,19 @@ static void exp_conv(const double *irf, int64_t n, double r, double *y, double *
     }
 }
 
+static void periodic_scale(double *y, double *z, int64_t n, double r, double period_bins)
+{
+    if ((period_bins > 0.0) == 0)
+        return;
+    double re = pow(r, period_bins), gain = 1.0 / (1.0 - re);
+    double dgain = period_bins * pow(r, period_bins - 1.0) * gain * gain;
+    for (int64_t i = 0; i < n; i++) {
+        if (z != NULL)
+            z[i] = z[i] * gain + y[i] * dgain;
+        y[i] *= gain;
+    }
+}
+
 static int cholesky_solve(double *A, double *b, int64_t n)
 {
     for (int64_t j = 0; j < n; j++) {
@@ -463,6 +476,7 @@ typedef struct {
     int64_t n_exp;
     double irf_sum;
     double dt;
+    double period_bins;
     const double *p0;
     const double *lo;
     const double *hi;
@@ -511,6 +525,7 @@ static double evaluate(const free_t *g, scratch_t *s, const double *p,
         double r = exp(-g->dt / tau);
         drdt[j] = r * g->dt / (tau * tau);
         exp_conv(g->irf, n, r, s->y + j * n, s->z + j * n);
+        periodic_scale(s->y + j * n, s->z + j * n, n, r, g->period_bins);
     }
     double base = bg * g->irf_sum, cost = 0.0;
     for (int64_t q = 0; q < g->n_fit; q++) {
@@ -539,7 +554,9 @@ static void chi2_terms(const free_t *g, scratch_t *s, const double *p,
     int64_t n = g->n_bins, ne = g->n_exp;
     for (int64_t j = 0; j < ne; j++) {
         double tau = p[j] > 1e-6 ? p[j] : 1e-6;
-        exp_conv(g->irf, n, exp(-g->dt / tau), s->y + j * n, s->z + j * n);
+        double r = exp(-g->dt / tau);
+        exp_conv(g->irf, n, r, s->y + j * n, s->z + j * n);
+        periodic_scale(s->y + j * n, NULL, n, r, g->period_bins);
     }
     double base = bg * g->irf_sum, num = 0.0, exp_sum = 0.0;
     uint8_t ok = 1;
@@ -658,6 +675,10 @@ static void free_chunk(void *work, void *local, int64_t lo, int64_t hi)
  * irf        n_bins, float64, already shifted, broadened and tailed
  * idx        n_fit bin indices, int64
  * dt         tcspc_res in the same units as p0, lo and hi
+ * period_bins the laser pulse period in bins, 0 for none. When it is set the
+ *            model adds the decay left over from every earlier pulse, and the
+ *            caller pads data, w_data and irf with zeros out to the period
+ *            so n_bins covers it, with idx still inside the measured bins.
  * p0, lo, hi 2 * n_exp, lifetimes then amplitudes
  * out_p      n_pix x 2 * n_exp, float64, written
  * out_cost   n_pix, float64, written
@@ -669,7 +690,7 @@ static void free_chunk(void *work, void *local, int64_t lo, int64_t hi)
 EXPORT int flimkit_c_free_tau(
     const double *data, const double *w_data, const double *bg,
     int64_t n_pix, int64_t n_bins, int64_t n_exp,
-    const double *irf, const int64_t *idx, int64_t n_fit, double dt,
+    const double *irf, const int64_t *idx, int64_t n_fit, double dt, double period_bins,
     const double *p0, const double *lo, const double *hi,
     int64_t max_iter, double tol,
     double *out_p, double *out_cost, int32_t *out_iter,
@@ -690,6 +711,7 @@ EXPORT int flimkit_c_free_tau(
     for (int64_t i = 0; i < n_bins; i++)
         g.irf_sum += irf[i];
     g.dt = dt;
+    g.period_bins = period_bins;
     g.p0 = p0;
     g.lo = lo;
     g.hi = hi;

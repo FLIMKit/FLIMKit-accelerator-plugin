@@ -25,7 +25,7 @@
 #define MAX_PP 36
 #define BLOCK 128
 
-extern "C" EXPORT int flimkit_cu_abi_version(void) { return 5; }
+extern "C" EXPORT int flimkit_cu_abi_version(void) { return 6; }
 
 extern "C" EXPORT int flimkit_cu_available(void)
 {
@@ -80,6 +80,7 @@ struct args_t {
     int n_exp;
     double irf_sum;
     double dt;
+    double period_bins;
     const double *bounds;
     int max_iter;
     double tol;
@@ -90,13 +91,19 @@ __device__ static double evaluate(const args_t a, const double *p, int b,
 {
     int n = a.n_bins, ne = a.n_exp, np = 2 * ne;
     double r[MAX_EXP], drdt[MAX_EXP], rn[MAX_EXP], rn1[MAX_EXP];
-    double y[MAX_EXP], z[MAX_EXP], jq[MAX_P];
+    double y[MAX_EXP], z[MAX_EXP], jq[MAX_P], gain[MAX_EXP], dgain[MAX_EXP];
     for (int j = 0; j < ne; j++) {
         double tau = p[j] > 1e-6 ? p[j] : 1e-6;
         r[j] = exp(-a.dt / tau);
         drdt[j] = r[j] * a.dt / (tau * tau);
         rn[j] = pow(r[j], (double)n);
         rn1[j] = pow(r[j], (double)(n - 1));
+        gain[j] = 1.0;
+        dgain[j] = 0.0;
+        if (a.period_bins > 0.0) {
+            gain[j] = 1.0 / (1.0 - pow(r[j], a.period_bins));
+            dgain[j] = a.period_bins * pow(r[j], a.period_bins - 1.0) * gain[j] * gain[j];
+        }
     }
     if (want_jac) {
         for (int k = 0; k < np; k++) {
@@ -133,8 +140,8 @@ __device__ static double evaluate(const args_t a, const double *p, int b,
         q++;
         double m = base;
         for (int j = 0; j < ne; j++) {
-            y[j] = y_prev[j];
-            z[j] = z_prev[j];
+            y[j] = y_prev[j] * gain[j];
+            z[j] = z_prev[j] * gain[j] + y_prev[j] * dgain[j];
             m += p[ne + j] * y[j];
         }
         /* Poisson maximum likelihood by Fisher scoring: weights from the current model, cost is the deviance */
@@ -281,11 +288,12 @@ __global__ static void chi2_kernel(args_t a, const double *P, int n_pix,
     double p[MAX_P];
     for (int k = 0; k < 2 * ne; k++)
         p[k] = P[(size_t)b * MAX_P + k];
-    double r[MAX_EXP], rn[MAX_EXP], y_prev[MAX_EXP];
+    double r[MAX_EXP], rn[MAX_EXP], y_prev[MAX_EXP], gain[MAX_EXP];
     for (int j = 0; j < ne; j++) {
         double tau = p[j] > 1e-6 ? p[j] : 1e-6;
         r[j] = exp(-a.dt / tau);
         rn[j] = pow(r[j], (double)n);
+        gain[j] = a.period_bins > 0.0 ? 1.0 / (1.0 - pow(r[j], a.period_bins)) : 1.0;
         double y0 = a.irf[0], rk = 1.0;
         for (int k = 1; k < n; k++) {
             rk *= r[j];
@@ -306,7 +314,7 @@ __global__ static void chi2_kernel(args_t a, const double *P, int n_pix,
         q++;
         double m = base;
         for (int j = 0; j < ne; j++)
-            m += p[ne + j] * y_prev[j];
+            m += p[ne + j] * y_prev[j] * gain[j];
         double dk = a.data[(size_t)b * n + i];
         if (!isfinite(dk) || dk < 0.0 || !isfinite(m) || m < 0.0)
             ok = 0;
@@ -327,7 +335,7 @@ __global__ static void chi2_kernel(args_t a, const double *P, int n_pix,
 extern "C" EXPORT int flimkit_cu_free_tau(
     const double *data, const double *w_data, const double *bg,
     int64_t n_pix, int64_t n_bins, int64_t n_exp,
-    const double *irf, const int64_t *idx, int64_t n_fit, double dt,
+    const double *irf, const int64_t *idx, int64_t n_fit, double dt, double period_bins,
     const double *p0, const double *lo, const double *hi,
     int64_t max_iter, double tol,
     double *out_p, double *out_cost, int32_t *out_iter,
@@ -397,6 +405,7 @@ extern "C" EXPORT int flimkit_cu_free_tau(
     for (int64_t i = 0; i < n_bins; i++)
         a.irf_sum += irf[i];
     a.dt = dt;
+    a.period_bins = period_bins;
     a.bounds = d_bounds;
     a.max_iter = (int)max_iter;
     a.tol = tol;
