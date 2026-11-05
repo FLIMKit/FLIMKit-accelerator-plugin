@@ -25,7 +25,7 @@
 #define MAX_PP 36
 #define BLOCK 128
 
-extern "C" EXPORT int flimkit_cu_abi_version(void) { return 4; }
+extern "C" EXPORT int flimkit_cu_abi_version(void) { return 5; }
 
 extern "C" EXPORT int flimkit_cu_available(void)
 {

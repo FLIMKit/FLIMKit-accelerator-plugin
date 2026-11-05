@@ -36,7 +36,7 @@
 #define MAX_P (2 * MAX_EXP)
 #define CHUNK 256
 
-EXPORT int flimkit_c_abi_version(void) { return 4; }
+EXPORT int flimkit_c_abi_version(void) { return 5; }
 
 static int cpu_count(void)
 {

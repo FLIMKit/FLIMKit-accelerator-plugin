@@ -8,9 +8,9 @@ from flimkit.FLIM.fit_tools import TAU_FIT_UNIT_S, calibrated_from_terms
 from flimkit.GPU import PluginBackend
 from flimkit.plugins import fit_backend
 
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 FLIMKIT_PLUGIN_API = 1
-ABI_VERSION = 4
+ABI_VERSION = 5
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def library_name():
