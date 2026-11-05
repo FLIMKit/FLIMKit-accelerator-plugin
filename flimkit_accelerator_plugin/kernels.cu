@@ -137,9 +137,11 @@ __device__ static double evaluate(const args_t a, const double *p, int b,
             z[j] = z_prev[j];
             m += p[ne + j] * y[j];
         }
-        double w = sqrt(a.w_data[(size_t)b * n + i] > 1.0 ? a.w_data[(size_t)b * n + i] : 1.0);
-        double ri = (m - a.data[(size_t)b * n + i]) / w;
-        cost += ri * ri;
+        /* Poisson maximum likelihood by Fisher scoring: weights from the current model, cost is the deviance */
+        double mm = m > 1e-12 ? m : 1e-12, di = a.data[(size_t)b * n + i];
+        cost += di > 0.0 ? 2.0 * (mm - di + di * log(di / mm)) : 2.0 * mm;
+        double w = sqrt(mm > 1.0 ? mm : 1.0);
+        double ri = (m - di) / w;
         if (want_jac) {
             for (int j = 0; j < ne; j++) {
                 jq[j] = p[ne + j] * z[j] * drdt[j] / w;

@@ -518,13 +518,15 @@ static double evaluate(const free_t *g, scratch_t *s, const double *p,
         double m = base;
         for (int64_t j = 0; j < ne; j++)
             m += p[ne + j] * s->y[j * n + i];
-        double ri = (m - d[i]) / s->w[i];
-        cost += ri * ri;
+        /* Poisson maximum likelihood by Fisher scoring: weights from the current model, cost is the deviance */
+        double mm = m > 1e-12 ? m : 1e-12, di = d[i];
+        cost += di > 0.0 ? 2.0 * (mm - di + di * log(di / mm)) : 2.0 * mm;
         if (want_J == 1) {
-            s->res[q] = ri;
+            double wi = sqrt(mm > 1.0 ? mm : 1.0);
+            s->res[q] = (m - di) / wi;
             for (int64_t j = 0; j < ne; j++) {
-                s->J[q * np + j] = p[ne + j] * s->z[j * n + i] * drdt[j] / s->w[i];
-                s->J[q * np + ne + j] = s->y[j * n + i] / s->w[i];
+                s->J[q * np + j] = p[ne + j] * s->z[j * n + i] * drdt[j] / wi;
+                s->J[q * np + ne + j] = s->y[j * n + i] / wi;
             }
         }
     }
